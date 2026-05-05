@@ -288,7 +288,9 @@ class OrcaParser:
         # Look for ! B3LYP def2-TZVP etc.
         simple_pattern = re.compile(r'^\s*!\s+(.*)', re.MULTILINE | re.IGNORECASE)
         for m in simple_pattern.finditer(text):
-            tokens = m.group(1).split()
+            # Stop at literal \n (escaped newline) in case the string wasn't fully decoded
+            line_content = m.group(1).partition("\\n")[0]
+            tokens = line_content.split()
             for tok in tokens:
                 tok_lower = tok.lower()
                 if any(x in tok_lower for x in ('def2', 'cc-p', 'aug-', 'pcseg', 'ano', 'sto', '6-31', '6-311')):

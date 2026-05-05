@@ -1,9 +1,13 @@
 """LLM initialization + Langfuse tracing callback."""
 
+import logging
 import os
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+
+# Silence the OTLP exporter error spam when Langfuse is not configured
+logging.getLogger("opentelemetry.exporter.otlp.proto.http.trace_exporter").setLevel(logging.CRITICAL)
 
 load_dotenv()
 
