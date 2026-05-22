@@ -1,6 +1,6 @@
 """Prompt-based ReAct agent (works with LLMs that lack native tool-calling)."""
 
-from langchain.agents import AgentExecutor, create_react_agent
+from langchain_classic.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import PromptTemplate
 
 from agent.llm import get_langfuse_handler, llm
@@ -24,6 +24,11 @@ CRITICAL RULES:
 4. If user asks to calculate ("посчитай", "calculate"), call run_pyscf with the ORIGINAL input string.
 
 5. NEVER invent or simulate results. Only return what tools actually return.
+
+6. If the user provides a molecule by NAME (e.g. "water", "caffeine", "aspirin") without giving
+   explicit atom coordinates, call get_molecule_from_pubchem FIRST to fetch the 3D structure.
+   The tool returns an ORCA input block — use THAT block if a calculation is also needed.
+   Do NOT fabricate atom coordinates yourself.
 
 Rules for chemistry:
 - Double-hybrid DFT (B2PLYP, PWPB95, DSD-*) must be detected BEFORE general DFT

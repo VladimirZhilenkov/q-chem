@@ -28,8 +28,10 @@ def run_pyscf(orca_or_psi4_input: str) -> str:
         except json.JSONDecodeError:
             pass
 
-    if "\\n" in raw and "\n" not in raw:
-        raw = raw.encode("utf-8").decode("unicode_escape")
+    # Normalize escaped newlines regardless of whether real newlines also exist.
+    # The LLM sometimes double-encodes \n (e.g. \\n) even after JSON parsing.
+    if "\\n" in raw:
+        raw = raw.replace("\\n", "\n").replace("\\t", "\t")
 
     result = _run_pyscf_impl(raw, fmt="auto")
     energy_str = (

@@ -4,6 +4,17 @@ app.py
 Chainlit interface for quantum chemistry agent.
 """
 
+import logging
+import sys
+import pathlib
+
+# Ensure the project root is on sys.path regardless of where chainlit is launched from
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
+# Silence harmless Socket.IO "Invalid session" reconnect noise on server restart
+logging.getLogger("engineio.server").setLevel(logging.CRITICAL)
+logging.getLogger("socketio.server").setLevel(logging.CRITICAL)
+
 import chainlit as cl
 from agent.graph import run_agent, stream_agent
 

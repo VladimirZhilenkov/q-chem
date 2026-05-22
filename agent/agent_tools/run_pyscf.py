@@ -7,6 +7,7 @@ Takes raw ORCA or Psi4 input as string, converts to PySCF, runs it via subproces
 and returns QChemResult with energy, converged status, geometry, etc.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -17,6 +18,10 @@ from typing import Optional
 
 from schemas import QChemResult
 from converter.qchem_converter import convert, detect_format
+
+# Allow overriding the Python used to run PySCF scripts.
+# Set PYSCF_PYTHON in .env to point at a conda/WSL Python that has pyscf installed.
+_PYSCF_PYTHON = os.getenv("PYSCF_PYTHON", sys.executable)
 
 
 def run_pyscf(
@@ -76,7 +81,7 @@ def run_pyscf(
         # Run the script via subprocess, capturing stdout and stderr
         try:
             result = subprocess.run(
-                [sys.executable, str(script_path)],
+                [_PYSCF_PYTHON, str(script_path)],
                 cwd=str(tmpdir_path),
                 capture_output=True,
                 text=True,
@@ -93,6 +98,16 @@ def run_pyscf(
         wall_time = time.time() - start_time
 
         if result.returncode != 0:
+            if "No module named 'pyscf'" in raw_output or "No module named pyscf" in raw_output:
+                raise RuntimeError(
+                    "PySCF is not installed in this Python environment.\n\n"
+                    "PySCF only runs on Linux/macOS. On Windows you must use WSL2:\n"
+                    "  1. Open PowerShell as Administrator and run: wsl --install\n"
+                    "  2. Restart your PC, then open Ubuntu and run: pip install pyscf\n"
+                    "  3. Find the WSL Python path: wsl which python3\n"
+                    "  4. Add to .env: PYSCF_PYTHON=<that path>\n"
+                    "  See the project README for full setup instructions."
+                )
             raise RuntimeError(
                 f"PySCF subprocess failed with return code {result.returncode}. "
                 f"Output:\n{raw_output.strip()}"
