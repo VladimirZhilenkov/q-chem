@@ -1,52 +1,43 @@
+"""Tool: парсинг ORCA/Psi4 входа в текстовое резюме."""
+
+from typing import Annotated
+
 from langchain_core.tools import tool
-from loguru import logger
 
-# НЕ импортируем QChemJob здесь
-# from schemas import QChemJob  # УБРАТЬ!
+from converter.qchem_converter import OrcaParser, Psi4Parser
 
-@tool(description="Convert raw quantum chemistry input (ORCA or Psi4) into a standardized QChemJob object.")
-def standardize_chem_input(raw_format: str, input_format: str = "auto"):
-    """Convert raw quantum chemistry input (ORCA or Psi4) into a standardized QChemJob object."""
-    # Импортируем ВНУТРИ функции
-    from converter.qchem_converter import OrcaParser, Psi4Parser
-    from schemas import QChemJob
-    
-    try:
-        if input_format == "auto":
-            if "!" in raw_format or raw_format.strip().startswith("!"):
-                input_format = "orca"
-            elif "molecule" in raw_format:
-                input_format = "psi4"
-            else:
-                raise ValueError("Cannot detect format")
-            
-        if input_format == "orca":
-            parser = OrcaParser()
-        elif input_format == "psi4":
-            parser = Psi4Parser()
-        else:
-            raise ValueError(f"Unsupported format: {input_format}")
-        
-        job = parser.parse(raw_format)
-        logger.info(f"Successfully parsed {input_format} input")
-        return job
-    
-    except Exception as e:
-        logger.error(f"Standardization failed: {e}")
-        raise
 
-if __name__ == "__main__":
-    test_input = """
-    ! B3LYP def2-TZVP
-    * xyz 0 1
-    H 0 0 0
-    H 0 0 0.74
-    *
-    """
+def _detect_format(text: str) -> str:
+    if "!" in text or text.strip().startswith("!"):
+        return "orca"
+    if "molecule" in text:
+        return "psi4"
+    raise ValueError("Cannot detect format (expected ORCA '!' or Psi4 'molecule').")
 
-    res = standardize_chem_input.invoke({
-        "raw_format": test_input,
-        "input_format": "auto"
-    })
 
-    print(res)
+@tool
+def standardize_chem_input(
+    raw_format: Annotated[str, "Raw ORCA or Psi4 input text."],
+    input_format: Annotated[str, "Format: auto (default), orca, or psi4."] = "auto",
+) -> str:
+    """Parse ORCA or Psi4 input and return a normalized text summary."""
+    fmt = input_format if input_format != "auto" else _detect_format(raw_format)
+
+    if fmt == "orca":
+        job = OrcaParser().parse(raw_format)
+    elif fmt == "psi4":
+        job = Psi4Parser().parse(raw_format)
+    else:
+        raise ValueError(f"Unsupported format: {fmt}")
+
+    atoms = ", ".join(atom[0] for atom in job.atoms[:5])
+    if len(job.atoms) > 5:
+        atoms += f", ... (+{len(job.atoms) - 5})"
+
+    return (
+        f"Molecule: {len(job.atoms)} atoms ({atoms})\n"
+        f"Method: {job.method}\n"
+        f"Basis: {job.basis}\n"
+        f"Charge: {job.charge}, Multiplicity: {job.multiplicity}\n"
+        f"Job type: {job.job_type}"
+    )

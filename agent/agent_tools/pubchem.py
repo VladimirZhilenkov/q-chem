@@ -1,6 +1,10 @@
 """PubChem REST API tool — fetch molecular 3D structure and properties."""
 
+from __future__ import annotations
+
 import json
+from typing import Annotated
+
 import requests
 from langchain_core.tools import tool
 from loguru import logger
@@ -68,7 +72,6 @@ def _parse_record(data: dict) -> dict:
 
     symbols = [_sym(z) for z in cmpd["atoms"]["element"]]
 
-    # Grab the first conformer that has a z-array (→ 3D)
     coords = None
     for coord_block in cmpd.get("coords", []):
         for conf in coord_block.get("conformers", []):
@@ -92,8 +95,14 @@ def _parse_record(data: dict) -> dict:
         elif label == "Molecular Weight":
             weight = str(val.get("fval", val.get("sval", "")))
 
-    return {"symbols": symbols, "coords": coords, "charge": charge,
-            "iupac": iupac, "formula": formula, "weight": weight}
+    return {
+        "symbols": symbols,
+        "coords": coords,
+        "charge": charge,
+        "iupac": iupac,
+        "formula": formula,
+        "weight": weight,
+    }
 
 
 def _to_orca(mol: dict, method: str, basis: str, multiplicity: int, job_type: str) -> str:
@@ -108,24 +117,14 @@ def _to_orca(mol: dict, method: str, basis: str, multiplicity: int, job_type: st
 
 
 @tool
-def get_molecule_from_pubchem(query: str) -> str:
-    """Fetch a molecule's 3D structure from PubChem and return its properties plus a ready-to-use ORCA input block.
-
-    Use this tool when the user refers to a molecule by name (common or IUPAC), asks to
-    'look up' a molecule, or needs geometry before running a calculation.
-
-    Pass ONLY the molecule name as a plain string, e.g.:
-        aspirin
-        water
-        caffeine
-    Optionally pass a JSON object to control the calculation:
-        {"molecule_name": "aspirin", "method": "B3LYP", "basis": "def2-SVP", "job_type": "energy"}
-
-    Returns:
-        Molecule summary (name, formula, weight, charge, atom count) followed by an
-        ORCA input block that can be passed directly to run_pyscf.
-    """
-    # Unwrap JSON if the LLM passed the full Action Input dict as a single string
+def get_molecule_from_pubchem(
+    query: Annotated[
+        str,
+        "Molecule name (common or IUPAC) or JSON with keys "
+        "molecule_name, method, basis, job_type.",
+    ],
+) -> str:
+    """Look up a molecule in PubChem and return properties plus an ORCA input block."""
     molecule_name = query.strip()
     method = "B3LYP"
     basis = "def2-SVP"
@@ -142,10 +141,10 @@ def get_molecule_from_pubchem(query: str) -> str:
         except json.JSONDecodeError:
             pass
 
-    logger.info(f"PubChem lookup: '{molecule_name}'")
+    logger.info("PubChem lookup: '{}'", molecule_name)
     try:
         cid = _get_cid(molecule_name)
-        logger.info(f"Resolved '{molecule_name}' → CID {cid}")
+        logger.info("Resolved '{}' → CID {}", molecule_name, cid)
 
         data = _fetch_record(cid, "3d") or _fetch_record(cid, "2d")
         if data is None:
@@ -158,7 +157,6 @@ def get_molecule_from_pubchem(query: str) -> str:
                 "Please provide the geometry manually."
             )
 
-        # Supplement with the dedicated properties endpoint (richer than the record JSON)
         props = _fetch_properties(cid)
         formula = props.get("MolecularFormula") or mol["formula"]
         weight = str(props.get("MolecularWeight") or mol["weight"])
@@ -174,14 +172,17 @@ def get_molecule_from_pubchem(query: str) -> str:
             f"Charge          : {mol['charge']}\n"
             f"Multiplicity    : 1  (assumed singlet; adjust if the molecule is a radical)\n"
             f"Atoms           : {len(mol['coords'])}\n"
-            f"\nORCA input (pass this string directly to run_pyscf):\n{orca_block}"
+            f"\nORCA input:\n{orca_block}"
         )
 
     except requests.exceptions.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else "?"
         if code == 404:
-            return f"Molecule '{molecule_name}' not found in PubChem. Check spelling or try the IUPAC name."
+            return (
+                f"Molecule '{molecule_name}' not found in PubChem. "
+                "Check spelling or try the IUPAC name."
+            )
         return f"PubChem HTTP {code}: {exc}"
     except Exception as exc:
-        logger.error(f"PubChem error for '{molecule_name}': {exc}")
+        logger.error("PubChem error for '{}': {}", molecule_name, exc)
         return f"Error fetching from PubChem: {exc}"

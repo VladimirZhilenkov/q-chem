@@ -1,64 +1,47 @@
-"""Prompt-based ReAct agent (works with LLMs that lack native tool-calling)."""
+"""ReAct-агент с диалоговой памятью.
 
-from langchain_classic.agents import AgentExecutor, create_react_agent
+Структура (читать сверху вниз):
+  1. PROMPT   — как LLM рассуждает и вызывает tools
+  2. executor — цикл Thought → Action → Observation
+  3. _memory  — история чата по session_id
+  4. run_agent — одна точка входа для UI и REPL
+"""
+
+import uuid
+
+from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import PromptTemplate
 
 from agent.llm import get_langfuse_handler, llm
 from agent.registry import get_tools
 
+
 REACT_PROMPT = PromptTemplate.from_template(
-    """You are a quantum chemistry assistant.
-
-CRITICAL RULES:
-1. standardize_chem_input returns a human-readable TEXT summary (not an object).
-   Example output: "Molecule: 2 atoms, method: hf, basis: sto-3g"
-   DO NOT try to parse it or pass it to other tools.
-
-2. run_pyscf expects RAW ORCA or Psi4 INPUT STRING (the original input with ! or molecule).
-   NEVER pass the output of standardize_chem_input to run_pyscf.
-   If you need to run a calculation, use the original input from the user.
-
-3. If user asks ONLY to parse ("распарси"), call standardize_chem_input and STOP.
-   Do NOT call run_pyscf.
-
-4. If user asks to calculate ("посчитай", "calculate"), call run_pyscf with the ORIGINAL input string.
-
-5. NEVER invent or simulate results. Only return what tools actually return.
-
-6. If the user provides a molecule by NAME (e.g. "water", "caffeine", "aspirin") without giving
-   explicit atom coordinates, call get_molecule_from_pubchem FIRST to fetch the 3D structure.
-   The tool returns an ORCA input block — use THAT block if a calculation is also needed.
-   Do NOT fabricate atom coordinates yourself.
-
-Rules for chemistry:
-- Double-hybrid DFT (B2PLYP, PWPB95, DSD-*) must be detected BEFORE general DFT
-  and requires explicit xc-string + scaled MP2 on KS orbitals.
-- For SOS-functionals, same-spin scaling = 0.0.
-- Always report units (Hartree, Debye, cm^-1) in the final answer.
-
-You have access to the following tools:
+    """Answer the following questions as best you can. You have access to the following tools:
 
 {tools}
 
-Use EXACTLY this format:
+Use the following format:
 
-Question: the input question
-Thought: reasoning about what to do
-Action: one of [{tool_names}]
-Action Input: a JSON object with tool arguments
-Observation: the tool's output
-... (repeat Thought/Action/Action Input/Observation as needed)
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
 Thought: I now know the final answer
-Final Answer: the answer to the user
+Final Answer: the final answer to the original input question
 
-Question: {input}
+Begin!
+
+{chat_history}Question: {input}
 Thought:{agent_scratchpad}"""
 )
 
+
 tools = get_tools()
-_react_agent = create_react_agent(llm, tools, REACT_PROMPT)
 executor = AgentExecutor(
-    agent=_react_agent,
+    agent=create_react_agent(llm, tools, REACT_PROMPT),
     tools=tools,
     verbose=True,
     handle_parsing_errors=True,
@@ -66,42 +49,75 @@ executor = AgentExecutor(
 )
 
 
-def _build_config(session_id: str | None):
-    handler = get_langfuse_handler()
-    config: dict = {"callbacks": [handler]} if handler else {}
-    if session_id:
-        config.setdefault("metadata", {})["session_id"] = session_id
-    return config, handler
+_memory: dict[str, list[tuple[str, str]]] = {}
 
 
-def _flush(handler):
-    if handler is None:
-        return
-    try:
-        from langfuse import Langfuse
-        Langfuse().flush()
-    except Exception:
-        pass
+def clear_memory(session_id: str) -> None:
+    _memory.pop(session_id, None)
+
+
+def _history_text(session_id: str | None) -> str:
+    """Собрать прошлые реплики в строку для промпта."""
+    if not session_id or session_id not in _memory:
+        return ""
+    lines = []
+    for question, answer in _memory[session_id]:
+        lines.append(f"Human: {question}")
+        lines.append(f"Assistant: {answer}")
+    return "\n".join(lines) + "\n"
 
 
 def run_agent(query: str, session_id: str | None = None) -> str:
-    """Invoke the ReAct agent; returns final answer string."""
-    config, handler = _build_config(session_id)
-    try:
-        result = executor.invoke({"input": query}, config=config)
-        return result["output"]
-    finally:
-        _flush(handler)
+    """Один ход агента. Память работает только если передан session_id."""
+    # Опциональный трейсинг в Langfuse (если настроен .env)
+    handler = get_langfuse_handler()
+    config = {"callbacks": [handler]} if handler else {}
+
+    result = executor.invoke(
+        {"input": query, "chat_history": _history_text(session_id)},
+        config=config,
+    )
+    answer = result["output"]
+
+    if session_id:
+        _memory.setdefault(session_id, []).append((query, answer))
+
+    if handler:
+        try:
+            from langfuse import Langfuse
+            Langfuse().flush()
+        except Exception:
+            pass
+
+    return answer
 
 
-def stream_agent(query: str, session_id: str | None = None):
-    """Stream intermediate steps."""
-    config, handler = _build_config(session_id)
-    try:
-        for step in executor.stream({"input": query}, config=config):
-            yield step
-    finally:
-        _flush(handler)
+def repl() -> None:
+    """Терминальный чат для локальной отладки."""
+    session_id = str(uuid.uuid4())
+    print("REPL запущен. Команды: exit, quit, /clear\n")
+
+    while True:
+        try:
+            query = input("You> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye.")
+            break
+
+        if not query:
+            continue
+        if query.lower() in {"exit", "quit"}:
+            break
+        if query.lower() == "/clear":
+            clear_memory(session_id)
+            print("Память очищена.\n")
+            continue
+
+        try:
+            print(f"\nAgent> {run_agent(query, session_id=session_id)}\n")
+        except Exception as exc:
+            print(f"Error: {exc}\n")
 
 
-__all__ = ["executor", "run_agent", "stream_agent"]
+if __name__ == "__main__":
+    repl()

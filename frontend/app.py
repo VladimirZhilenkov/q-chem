@@ -1,60 +1,50 @@
-"""
-app.py
-------
-Chainlit interface for quantum chemistry agent.
-"""
+"""Chainlit UI for the quantum chemistry agent."""
 
 import logging
-import sys
 import pathlib
+import sys
+import uuid
 
-# Ensure the project root is on sys.path regardless of where chainlit is launched from
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-# Silence harmless Socket.IO "Invalid session" reconnect noise on server restart
 logging.getLogger("engineio.server").setLevel(logging.CRITICAL)
 logging.getLogger("socketio.server").setLevel(logging.CRITICAL)
 
 import chainlit as cl
-from agent.graph import run_agent, stream_agent
 
+from agent.graph import clear_memory, run_agent
 
-@cl.on_message
-async def main(message: cl.Message):
-    """Handle incoming messages from the user."""
-    
-    # Get user's text input
-    user_query = message.content
-    
-    # Send a temporary message while processing
-    msg = cl.Message(content="")
-    await msg.send()
-    
-    # Run the agent and get the response
-    try:
-        # Option 1: Simple blocking call
-        response = run_agent(user_query)
-        msg.content = response
-        await msg.update()
-        
-        # Option 2: Streaming (uncomment to use instead)
-        # async for step in stream_agent(user_query):
-        #     if "output" in step:
-        #         msg.content = step["output"]
-        #         await msg.update()
-        
-    except Exception as e:
-        msg.content = f"Error: {str(e)}"
-        await msg.update()
+SESSION_KEY = "agent_session_id"
 
 
 @cl.on_chat_start
 async def start():
-    """Send welcome message when chat starts."""
+    cl.user_session.set(SESSION_KEY, str(uuid.uuid4()))
     await cl.Message(
-        content="Quantum Chemistry Assistant\n\n"
-                "I can help you:\n"
-                "- Parse ORCA/Psi4 input: `распарси <input>`\n"
-                "- Run calculations: `посчитай <input>`\n\n"
-                "Send your quantum chemistry input to get started!"
+        content=(
+            "Quantum Chemistry Assistant\n\n"
+            "Ask about molecules, ORCA/Psi4 input, or calculations.\n"
+            "Dialogue history is kept for this chat session."
+        )
     ).send()
+
+
+@cl.on_message
+async def main(message: cl.Message):
+    session_id = cl.user_session.get(SESSION_KEY)
+    msg = cl.Message(content="")
+    await msg.send()
+
+    try:
+        msg.content = run_agent(message.content, session_id=session_id)
+        await msg.update()
+    except Exception as exc:
+        msg.content = f"Error: {exc}"
+        await msg.update()
+
+
+@cl.on_chat_end
+async def end():
+    session_id = cl.user_session.get(SESSION_KEY)
+    if session_id:
+        clear_memory(session_id)
