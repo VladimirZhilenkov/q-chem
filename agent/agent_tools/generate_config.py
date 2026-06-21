@@ -4,7 +4,6 @@ from typing import Annotated
 from langchain_core.tools import tool
 from schemas import QChemJob
 from config_generators import generate_pyscf, generate_orca, generate_psi4, generate_xtb
-import json
 
 
 @tool

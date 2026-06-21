@@ -8,6 +8,7 @@ Features:
   • Persistent conversation memory per session
 """
 
+import asyncio
 import logging
 import pathlib
 import sys
@@ -65,7 +66,8 @@ async def main(message: cl.Message):
     await msg.send()
     
     try:
-        response = run_agent(message.content, session_id=session_id)
+        # run_agent is synchronous — offload to thread pool to avoid blocking the event loop
+        response = await asyncio.to_thread(run_agent, message.content, session_id)
         msg.content = response
         await msg.update()
     except Exception as exc:

@@ -39,7 +39,7 @@ agent = [
     "typer>=0.12",
     "langsmith>=0.1",
     "langchain-openai>=0.2",
-    "langfuse>=2.50,<3",
+    "langfuse>=3",
 ]
 
 # Ihsaan — database, async, training

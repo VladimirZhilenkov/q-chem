@@ -199,6 +199,28 @@ class Psi4Parser:
 # ORCA parser
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ORCA "! ..." route-line tokens that are NOT methods: run types and common
+# accuracy / auxiliary / dispersion modifiers. Used to avoid mistaking them for
+# the method when parsing the simple-input line.
+_ORCA_NON_METHOD_KEYWORDS = {
+    # run types
+    "sp", "energy", "opt", "copt", "zopt", "freq", "numfreq", "anfreq",
+    "optfreq", "engrad", "numgrad", "md", "scants", "neb", "neb-ts", "irc",
+    # SCF convergence / accuracy
+    "tightscf", "verytightscf", "normalscf", "loosescf", "sloppyscf",
+    "extremescf", "slowconv", "veryslowconv", "kdiis", "soscf", "diis", "noiter",
+    # grids / RI / aux
+    "rijcosx", "rijk", "ri", "nori", "ri-jk", "ri-j", "autoaux", "noautostart",
+    "defgrid1", "defgrid2", "defgrid3", "grid4", "grid5", "grid6", "finalgrid6",
+    "nofinalgrid", "gridx4", "gridx5", "gridx6",
+    # dispersion
+    "d3", "d3bj", "d3zero", "d4", "abc",
+    # printing / misc
+    "miniprint", "smallprint", "largeprint", "normalprint", "printbasis",
+    "nopop", "bohrs", "angs", "xyzfile", "pal2", "pal4", "pal8", "pal16",
+}
+
+
 class OrcaParser:
     """Parse an ORCA input file (.inp) into a QChemJob."""
 
@@ -272,8 +294,14 @@ class OrcaParser:
 
     # ------------------------------------------------------------------
     def _parse_simple_input(self, text: str) -> tuple[str, str]:
-        """Extract method and basis from simple input line (!)."""
-        method = "hf"
+        """Extract method and basis from simple input line (!).
+
+        ORCA route lines mix the method and basis with run-type keywords
+        (SP, Opt, Freq) and accuracy/auxiliary modifiers (TightSCF, RIJCOSX,
+        D3BJ, ...). Those are NOT methods, so they must be skipped — otherwise
+        a trailing keyword like "SP" gets mistaken for the method.
+        """
+        method = None
         basis_name = "sto-3g"
 
         # Look for ! B3LYP def2-TZVP etc.
@@ -286,10 +314,13 @@ class OrcaParser:
                 tok_lower = tok.lower()
                 if any(x in tok_lower for x in ('def2', 'cc-p', 'aug-', 'pcseg', 'ano', 'sto', '6-31', '6-311')):
                     basis_name = basis(tok.strip())
-                else:
+                elif tok_lower in _ORCA_NON_METHOD_KEYWORDS:
+                    continue
+                elif method is None:
+                    # First non-basis, non-keyword token is the method
                     method = tok.strip()
 
-        return method, basis_name
+        return method or "hf", basis_name
 
     # ------------------------------------------------------------------
     def _parse_job_type(self, text: str) -> str:

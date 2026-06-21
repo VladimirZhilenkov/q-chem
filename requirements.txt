@@ -8,7 +8,7 @@ anyio==4.13.0
 argcomplete==3.6.3
 asyncer==0.0.17
 attrs==26.1.0
-audioop-lts==0.2.2
+
 backoff==2.2.1
 basis_set_exchange==0.12
 bidict==0.23.1

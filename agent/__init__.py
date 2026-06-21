@@ -1,7 +1,7 @@
-"""Agent module - ReAct-based quantum chemistry assistant.
+"""Agent module - structured-chat quantum chemistry assistant.
 
 Core components:
-  • graph.py    - Agent executor with ReAct loop
+  • graph.py    - Agent executor (structured-chat, JSON action blobs)
   • llm.py      - LLM configuration and Langfuse tracing
   • registry.py - Tool registry
   • repl.py     - Interactive REPL for debugging
