@@ -1,14 +1,16 @@
-"""ReAct agent with simple dialogue memory and logging.
+"""Tool calling agent with simple dialogue memory and logging.
 
-Minimal architecture:
-  1. PROMPT     — tells LLM how to think and call tools
-  2. executor   — ReAct loop: Thought → Action → Observation
-  3. _memory    — conversation history by session_id
-  4. run_agent  — main entry point for UI and REPL
+Architecture:
+  1. PROMPT     — ChatPromptTemplate with MessagesPlaceholder
+  2. agent      — create_tool_calling_agent (native tool calling)
+  3. executor   — tool calling loop (not ReAct format)
+  4. _memory    — conversation history by session_id
+  5. run_agent  — main entry point for UI and REPL
 """
 
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_core.prompts import PromptTemplate
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 from loguru import logger
 import sys
 
@@ -35,40 +37,44 @@ logger.add(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ReAct prompt
+# Tool calling prompt (native format, no JSON instructions)
 # ─────────────────────────────────────────────────────────────────────────────
 
-REACT_PROMPT = PromptTemplate.from_template(
-    """You are a quantum chemistry assistant. Help users generate configurations for quantum chemistry calculations.
+TOOL_CALLING_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are a quantum chemistry assistant. Help users generate configurations for quantum chemistry calculations.
 
-Available tools:
-{tools}
+You have access to tools that can:
+• Parse molecule descriptions and recognize common molecules (water, methane, benzene, etc.)
+• Validate basis sets in the Basis Set Exchange
+• Generate quantum chemistry input files for PySCF, ORCA, Psi4, or xTB
+• Fetch molecular structures from PubChem
+• Echo/debug messages
 
-Use this format:
-Question: the input question
-Thought: what you should do
-Action: the action to take, one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result
-... (repeat as needed)
-Thought: I now have the answer
-Final Answer: the final response
-
-Past conversation:
-{chat_history}
-
-Question: {input}
-Thought:{agent_scratchpad}"""
+Use the available tools to help the user. Call tools when needed to complete the task.
+Be concise and direct in your responses.""",
+        ),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ]
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Agent executor
+# Agent setup
 # ─────────────────────────────────────────────────────────────────────────────
 
 tools = get_tools()
+
+# Create agent with native tool calling (not ReAct format)
+agent = create_tool_calling_agent(llm, tools, TOOL_CALLING_PROMPT)
+
+# Agent executor with same parameters as before
 executor = AgentExecutor(
-    agent=create_react_agent(llm, tools, REACT_PROMPT),
+    agent=agent,
     tools=tools,
     verbose=True,
     handle_parsing_errors=True,
@@ -91,17 +97,28 @@ def clear_memory(session_id: str) -> None:
         _memory.pop(session_id, None)
 
 
-def _history_text(session_id: str | None) -> str:
-    """Convert past interactions to text for prompt."""
+def _history_messages(session_id: str | None) -> list:
+    """Convert stored history to list of BaseMessage objects for chat_history.
+    
+    Parameters
+    ----------
+    session_id : str | None
+        Session ID to retrieve history from.
+    
+    Returns
+    -------
+    list
+        List of HumanMessage and AIMessage objects.
+    """
     if not session_id or session_id not in _memory:
-        return ""
+        return []
     
-    lines = []
-    for q, a in _memory[session_id]:
-        lines.append(f"Human: {q}")
-        lines.append(f"Assistant: {a}\n")
+    messages = []
+    for question, answer in _memory[session_id]:
+        messages.append(HumanMessage(content=question))
+        messages.append(AIMessage(content=answer))
     
-    return "\n".join(lines)
+    return messages
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +126,7 @@ def _history_text(session_id: str | None) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_agent(query: str, session_id: str | None = None) -> str:
-    """Run one step of the agent.
+    """Run one step of the agent with tool calling.
     
     Parameters
     ----------
@@ -129,12 +146,12 @@ def run_agent(query: str, session_id: str | None = None) -> str:
     handler = get_langfuse_handler()
     config = {"callbacks": [handler]} if handler else {}
     
-    # Run agent
+    # Run agent with message-based history (tool calling format)
     try:
         result = executor.invoke(
             {
                 "input": query,
-                "chat_history": _history_text(session_id),
+                "chat_history": _history_messages(session_id),
             },
             config=config,
         )
@@ -144,7 +161,7 @@ def run_agent(query: str, session_id: str | None = None) -> str:
         logger.error(f"Agent error: {e}")
         answer = f"Error: {str(e)}"
     
-    # Store in memory
+    # Store in memory (same format: (question, answer) tuples)
     if session_id:
         _memory.setdefault(session_id, []).append((query, answer))
         logger.debug(f"Memory updated for {session_id}")
