@@ -53,7 +53,9 @@ logger.add(
 
 _SYSTEM = """You are a quantum chemistry assistant. Help users generate configurations for quantum chemistry calculations.
 
-When you need a molecule's geometry, first try parse_molecule for common molecules, and fall back to get_molecule_from_pubchem for anything else. Use validate_basis to confirm a basis set before generating a config, and generate_config to produce the final input file. If the user asks you to RUN or EXECUTE the calculation, call run_calculation with ORCA-format input (generate it with generate_config using engine='orca', or use the ORCA block from get_molecule_from_pubchem) — it runs locally via PySCF and returns the energy and other results.
+To CALCULATE / COMPUTE / RUN anything (energy, geometry optimization, frequencies, HOMO-LUMO, charges, dipole), use run_calculation — it actually executes the calculation and returns the numbers. First get the geometry with parse_molecule (common molecules) or get_molecule_from_pubchem (anything else), then call run_calculation with that geometry as `atoms`, plus method/basis/job_type. Report the returned results to the user; never paste the raw tool output or a script as your answer.
+
+Only use generate_config when the user explicitly asks for the INPUT FILE / script itself (not results) — it does NOT run anything. Use validate_basis to confirm a basis set when unsure.
 
 You have access to the following tools:
 

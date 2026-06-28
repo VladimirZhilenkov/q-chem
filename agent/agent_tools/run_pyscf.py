@@ -19,7 +19,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 from loguru import logger
 
-from schemas import QChemResult
+from schemas import QChemJob, QChemResult
 from converter.qchem_converter import detect_format, parse
 from config_generators import generate_pyscf
 
@@ -57,9 +57,7 @@ def run_pyscf(
     RuntimeError
         If subprocess execution fails or times out.
     """
-    start_time = time.time()
-
-    # Step 1: Auto-detect format if needed
+    # Auto-detect format if needed
     if fmt == "auto":
         fmt = detect_format(orca_or_psi4_input, "input")
         if fmt == "unknown":
@@ -68,11 +66,17 @@ def run_pyscf(
                 "Pass fmt='psi4' or fmt='orca' explicitly."
             )
 
-    # Step 2: Parse input → QChemJob → PySCF script
+    # Parse input → QChemJob, then execute
     job = parse(orca_or_psi4_input, fmt=fmt, source_name="input")
+    return _execute_pyscf_job(job, timeout_seconds)
+
+
+def _execute_pyscf_job(job: QChemJob, timeout_seconds: int = 1800) -> QChemResult:
+    """Generate a PySCF script from a QChemJob, run it, and return parsed results."""
+    start_time = time.time()
     pyscf_script = generate_pyscf(job)
 
-    # Step 3: Execute the PySCF script in a temporary directory
+    # Execute the PySCF script in a temporary directory
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         script_path = tmpdir_path / "calc.py"
@@ -127,6 +131,14 @@ def run_pyscf(
             geometry=parsed.get("geometry"),
             frequencies=parsed.get("frequencies"),
             dipole=parsed.get("dipole"),
+            zpe=parsed.get("zpe"),
+            enthalpy=parsed.get("enthalpy"),
+            gibbs=parsed.get("gibbs"),
+            entropy=parsed.get("entropy"),
+            homo=parsed.get("homo"),
+            lumo=parsed.get("lumo"),
+            homo_lumo_gap=parsed.get("homo_lumo_gap"),
+            mulliken_charges=parsed.get("mulliken_charges"),
             wall_time=wall_time,
             engine="pyscf",
             method=parsed.get("method", "unknown"),
@@ -165,6 +177,14 @@ def _parse_pyscf_output(
         "geometry": None,
         "dipole": None,
         "frequencies": None,
+        "zpe": None,
+        "enthalpy": None,
+        "gibbs": None,
+        "entropy": None,
+        "homo": None,
+        "lumo": None,
+        "homo_lumo_gap": None,
+        "mulliken_charges": None,
         "method": "unknown",
         "basis": "unknown",
     }
@@ -176,9 +196,16 @@ def _parse_pyscf_output(
         result["basis"] = basis_match.group(1).lower()
 
     # ── Extract method from script ────────────────────────────────────────
-    # Priority 1: DFT functional — mf.xc = 'b3lyp'
+    # Priority 0: the authoritative runtime variable `method = '...'`. The whole
+    # if/elif dispatch (scf.RHF, dft.RKS, ...) is present in the script as text,
+    # so matching those would pick the wrong branch — this assignment is the one
+    # that actually runs.
+    runtime_method = re.search(r"^method\s*=\s*['\"]([^'\"]+)['\"]", pyscf_script, re.MULTILINE)
     xc_match = re.search(r"mf\.xc\s*=\s*['\"]([^'\"]+)['\"]", pyscf_script)
-    if xc_match:
+    if runtime_method:
+        result["method"] = runtime_method.group(1).lower()
+    elif xc_match:
+        # DFT functional — mf.xc = 'b3lyp'
         result["method"] = xc_match.group(1).lower()
     else:
         # Priority 2: Post-HF correlation method — corr = mp.MP2(mf) / cc.CCSD(mf)
@@ -198,8 +225,13 @@ def _parse_pyscf_output(
                 result["method"] = "hf" if "hf" in cls else cls
 
     # ── Parse energy ──────────────────────────────────────────────────────
+    # The generated script prints an authoritative "Energy (Hartree): ..." line
+    # AFTER any optimization. It must take priority: during an opt run PySCF emits
+    # many "converged SCF energy = ..." lines (one per geometry step), and the
+    # first one is the *starting* geometry — not the optimized result.
     energy_patterns = [
-        r"Total energy\s*=\s*([-\d.]+)",          # our print statement
+        r"Energy \(Hartree\):\s*([-\d.]+)",       # our authoritative final print
+        r"Total energy\s*=\s*([-\d.]+)",
         r"converged SCF energy\s*=\s*([-\d.]+)",  # PySCF native SCF line
         r"E\(\w+\)\s*=\s*([-\d.]+)",              # PySCF: E(RHF) = ...
         r"E\s*=\s*([-\d.]+)\s*Hartree",
@@ -273,18 +305,63 @@ def _parse_pyscf_output(
         except (ValueError, IndexError):
             pass
 
-    # ── Parse optimized geometry ──────────────────────────────────────────
-    geom_section = re.search(
-        r"(?:Final structure|Final coordinates|Geometry optimization complete)"
-        r"(?:.*?)((?:\s+\w{1,3}\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+)+)",
+    # ── Parse thermochemistry (freq jobs) ─────────────────────────────────
+    thermo_patterns = {
+        "zpe": r"ZPE \(Hartree\):\s*([-\d.]+)",
+        "enthalpy": r"Enthalpy \(Hartree\):\s*([-\d.]+)",
+        "gibbs": r"Gibbs \(Hartree\):\s*([-\d.]+)",
+        "entropy": r"Entropy \(Hartree/K\):\s*([-\d.]+)",
+    }
+    for key, pattern in thermo_patterns.items():
+        m = re.search(pattern, output)
+        if m:
+            try:
+                result[key] = float(m.group(1))
+            except (ValueError, IndexError):
+                pass
+
+    # ── Parse frontier orbitals (HOMO/LUMO/gap) ───────────────────────────
+    for key, pattern in (
+        ("homo", r"HOMO \(Hartree\):\s*([-\d.]+)"),
+        ("lumo", r"LUMO \(Hartree\):\s*([-\d.]+)"),
+        ("homo_lumo_gap", r"HOMO-LUMO gap \(eV\):\s*([-\d.]+)"),
+    ):
+        m = re.search(pattern, output)
+        if m:
+            try:
+                result[key] = float(m.group(1))
+            except (ValueError, IndexError):
+                pass
+
+    # ── Parse Mulliken charges ────────────────────────────────────────────
+    mulliken_section = re.search(
+        r"=== MULLIKEN CHARGES ===\s*(.*?)\s*=== END MULLIKEN ===",
         output,
-        re.IGNORECASE | re.DOTALL,
+        re.DOTALL,
+    )
+    if mulliken_section:
+        rows = re.findall(
+            r"^\s*([A-Za-z]{1,3})\s+([-\d.]+)",
+            mulliken_section.group(1),
+            re.MULTILINE,
+        )
+        if rows:
+            try:
+                result["mulliken_charges"] = [(sym, float(q)) for sym, q in rows]
+            except (ValueError, IndexError):
+                pass
+
+    # ── Parse optimized geometry ──────────────────────────────────────────
+    # Read the explicit block the generated script prints between markers.
+    geom_section = re.search(
+        r"=== OPTIMIZED GEOMETRY \(Angstrom\) ===\s*(.*?)\s*=== END GEOMETRY ===",
+        output,
+        re.DOTALL,
     )
     if geom_section:
-        geom_text = geom_section.group(1)
         atom_matches = re.findall(
-            r"^\s*(\w{1,3})\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)",
-            geom_text,
+            r"^\s*([A-Za-z]{1,3})\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)",
+            geom_section.group(1),
             re.MULTILINE,
         )
         if atom_matches:
@@ -314,33 +391,104 @@ def _format_result(res: QChemResult) -> str:
     if res.dipole is not None:
         lines.append(f"  Dipole (D)   : {res.dipole}")
     if res.frequencies:
+        imag = [f for f in res.frequencies if f < 0]
         lines.append(f"  Frequencies  : {res.frequencies} cm^-1")
+        if imag:
+            lines.append(f"  ⚠ Imaginary modes: {len(imag)} (not a minimum — likely a transition state)")
+    if res.zpe is not None:
+        lines.append(f"  ZPE          : {res.zpe} Hartree")
+    if res.enthalpy is not None:
+        lines.append(f"  Enthalpy H   : {res.enthalpy} Hartree (298.15 K)")
+    if res.gibbs is not None:
+        lines.append(f"  Gibbs G      : {res.gibbs} Hartree (298.15 K)")
+    if res.entropy is not None:
+        lines.append(f"  Entropy S    : {res.entropy} Hartree/K (298.15 K)")
+    if res.homo is not None:
+        lines.append(f"  HOMO         : {res.homo} Hartree")
+    if res.lumo is not None:
+        lines.append(f"  LUMO         : {res.lumo} Hartree")
+    if res.homo_lumo_gap is not None:
+        lines.append(f"  HOMO-LUMO gap: {res.homo_lumo_gap} eV")
+    if res.mulliken_charges:
+        chg = "\n".join(f"    {s} {q:+.4f}" for s, q in res.mulliken_charges)
+        lines.append(f"  Mulliken charges:\n{chg}")
     if res.geometry:
         geom = "\n".join(f"    {s} {x:.6f} {y:.6f} {z:.6f}" for s, x, y, z in res.geometry)
-        lines.append(f"  Optimized geometry:\n{geom}")
+        lines.append(f"  Optimized geometry (Angstrom):\n{geom}")
     return "\n".join(lines)
+
+
+def _parse_atoms(atoms: str) -> list[tuple[str, float, float, float]]:
+    """Parse 'SYM x y z, SYM x y z, ...' into a list of (sym, x, y, z) tuples."""
+    out: list[tuple[str, float, float, float]] = []
+    for chunk in atoms.split(","):
+        parts = chunk.split()
+        if len(parts) >= 4:
+            try:
+                out.append((parts[0], float(parts[1]), float(parts[2]), float(parts[3])))
+            except ValueError:
+                continue
+    return out
 
 
 @tool
 def run_calculation(
+    atoms: Annotated[
+        str,
+        "Molecule geometry as 'SYMBOL X Y Z' lines, comma-separated "
+        "(e.g. 'O 0 0 0, H 0.96 0 0, H -0.24 0.93 0'). Obtain it from parse_molecule. "
+        "Required unless you pass orca_or_psi4_input instead.",
+    ] = "",
+    method: Annotated[str, "Method or DFT functional: HF, B3LYP, PBE0, wB97X, MP2, CCSD, ..."] = "HF",
+    basis: Annotated[str, "Basis set: def2-SVP, 6-31G, STO-3G, ..."] = "def2-SVP",
+    charge: Annotated[int, "Molecular charge."] = 0,
+    multiplicity: Annotated[int, "Spin multiplicity (1=singlet, 2=doublet, ...)."] = 1,
+    job_type: Annotated[str, "energy, opt, or freq."] = "energy",
+    solvent: Annotated[str, "Solvent name, or empty for gas phase."] = "",
     orca_or_psi4_input: Annotated[
         str,
-        "Raw ORCA or Psi4 input text. It is converted to a PySCF script and "
-        "executed locally. Use generate_config (engine='orca') or the ORCA block "
-        "from get_molecule_from_pubchem to produce this input.",
-    ],
-    fmt: Annotated[str, "Input format: 'auto', 'orca', or 'psi4'."] = "auto",
-    timeout_seconds: Annotated[int, "Maximum wall time in seconds."] = 3600,
+        "Alternative input: raw ORCA/Psi4 text (e.g. the ORCA block from "
+        "get_molecule_from_pubchem). If given, the structured args above are ignored.",
+    ] = "",
+    timeout_seconds: Annotated[int, "Maximum wall time in seconds."] = 1800,
 ) -> str:
-    """Run a quantum chemistry calculation locally via PySCF and return the results.
+    """Execute a quantum chemistry calculation locally via PySCF and return the NUMBERS.
 
-    Converts the given ORCA/Psi4 input to a PySCF script, executes it, and reports
-    energy, convergence, dipole, frequencies, and wall time. Returns an error
-    message (not an exception) if conversion or execution fails.
+    USE THIS whenever the user asks to calculate / compute / run anything — energy,
+    geometry optimization (job_type='opt'), frequencies (job_type='freq'), or
+    properties (HOMO-LUMO, Mulliken charges, dipole are always reported). It actually
+    runs the calculation and returns results. Do NOT use generate_config to "run" —
+    that only writes an input file and does not compute anything.
+
+    Preferred: pass the molecule as structured args (atoms/method/basis/...).
+    Alternatively pass raw ORCA/Psi4 text via orca_or_psi4_input.
     """
-    logger.info("run_calculation: fmt={}, timeout={}s", fmt, timeout_seconds)
+    logger.info(
+        "run_calculation: job_type={}, method={}, basis={}", job_type, method, basis
+    )
     try:
-        res = run_pyscf(orca_or_psi4_input, fmt=fmt, timeout_seconds=timeout_seconds)
+        if orca_or_psi4_input.strip():
+            res = run_pyscf(orca_or_psi4_input, fmt="auto", timeout_seconds=timeout_seconds)
+        else:
+            atom_list = _parse_atoms(atoms)
+            if not atom_list:
+                return (
+                    "No molecule provided. Pass `atoms` as 'SYMBOL X Y Z' lines "
+                    "(comma-separated) — e.g. the output of parse_molecule — or pass "
+                    "orca_or_psi4_input."
+                )
+            job = QChemJob(
+                id="run",
+                method=method,
+                basis=basis,
+                charge=charge,
+                multiplicity=multiplicity,
+                atoms=atom_list,
+                job_type=job_type if job_type in ("energy", "opt", "freq") else "energy",
+                engine="pyscf",
+                solvent=solvent or None,
+            )
+            res = _execute_pyscf_job(job, timeout_seconds=timeout_seconds)
     except (ValueError, RuntimeError) as exc:
         logger.error("run_calculation failed: {}", exc)
         return f"Calculation failed: {exc}"

@@ -17,6 +17,7 @@ dependencies = [
 # Vladimir — QM tools
 qm = [
     "pyscf>=2.9",
+    "geometric>=1.1",  # geometry-optimization engine used by pyscf.geomopt
     "ase>=3.23",
     "rdkit>=2024.3",
 ]
@@ -76,4 +77,5 @@ target-version = "py311"
 testpaths = ["tests"]
 markers = [
     "agent: end-to-end test that invokes the full LLM agent (slow, requires LLM access)",
+    "slow: test that executes a real PySCF calculation (no network, but compute-heavy)",
 ]

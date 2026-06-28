@@ -32,8 +32,18 @@ class QChemResult(BaseModel):
     energy: float | None  # total energy in Hartree
     converged: bool
     geometry: list[tuple[str, float, float, float]] | None
-    frequencies: list[float] | None  # in cm⁻¹
+    frequencies: list[float] | None  # in cm⁻¹ (negative = imaginary mode)
     dipole: tuple[float, float, float] | None  # Debye
+    # Thermochemistry (populated for freq jobs), in Hartree (entropy in Hartree/K)
+    zpe: float | None = None  # zero-point vibrational energy
+    enthalpy: float | None = None  # H at 298.15 K
+    gibbs: float | None = None  # G at 298.15 K
+    entropy: float | None = None  # S at 298.15 K
+    # Frontier-orbital and population properties
+    homo: float | None = None  # HOMO energy in Hartree
+    lumo: float | None = None  # LUMO energy in Hartree
+    homo_lumo_gap: float | None = None  # HOMO-LUMO gap in eV
+    mulliken_charges: list[tuple[str, float]] | None = None  # (symbol, charge)
     wall_time: float  # seconds
     engine: str
     method: str

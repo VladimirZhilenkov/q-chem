@@ -9,15 +9,77 @@ from langchain_openai import ChatOpenAI
 
 # Silence OTLP exporter errors when Langfuse is not configured
 logging.getLogger("opentelemetry.exporter.otlp.proto.http.trace_exporter").setLevel(logging.CRITICAL)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-llm = ChatOpenAI(
-    model=os.getenv("QCHEM_MODEL", "openrouter/anthropic/claude-sonnet-4-6"),
-    base_url=os.getenv("QCHEM_BASE_URL", "https://inference.airi.net:46783/v1"),
-    api_key=os.getenv("QCHEM_API_KEY", ""),
-    temperature=0,
-)
+
+def _endpoint_reachable(base_url: str, api_key: str = "", timeout: float = 3.0) -> bool:
+    """Quick liveness probe for an OpenAI-compatible endpoint via GET /models."""
+    if not base_url:
+        return False
+    import httpx
+
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        resp = httpx.get(url, headers=headers, timeout=timeout)
+        # Auth failures (expired/invalid key) mean the endpoint is unusable —
+        # treat as unreachable so we fall back. Other non-5xx answers are OK.
+        if resp.status_code in (401, 403):
+            return False
+        return resp.status_code < 500
+    except Exception:
+        return False
+
+
+def _build_llm() -> ChatOpenAI:
+    """Use the primary endpoint when reachable; otherwise fall back to local Ollama.
+
+    Ollama exposes an OpenAI-compatible API (default http://localhost:11434/v1),
+    so the only thing that changes on fallback is the base URL and model name.
+    Set QCHEM_OLLAMA_MODEL (and optionally QCHEM_OLLAMA_BASE_URL) to enable it.
+    """
+    primary_model = os.getenv("QCHEM_MODEL", "openrouter/anthropic/claude-sonnet-4-6")
+    primary_base_url = os.getenv("QCHEM_BASE_URL", "https://inference.airi.net:46783/v1")
+    primary_api_key = os.getenv("QCHEM_API_KEY", "")
+
+    if _endpoint_reachable(primary_base_url, primary_api_key):
+        logger.info("Using primary LLM endpoint %s (model=%s)", primary_base_url, primary_model)
+        return ChatOpenAI(
+            model=primary_model,
+            base_url=primary_base_url,
+            api_key=primary_api_key,
+            temperature=0,
+        )
+
+    ollama_model = os.getenv("QCHEM_OLLAMA_MODEL", "")
+    ollama_base_url = os.getenv("QCHEM_OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    if ollama_model:
+        logger.warning(
+            "Primary LLM endpoint %s unreachable — falling back to Ollama %s (model=%s)",
+            primary_base_url, ollama_base_url, ollama_model,
+        )
+        return ChatOpenAI(
+            model=ollama_model,
+            base_url=ollama_base_url,
+            api_key="ollama",  # Ollama ignores the key but ChatOpenAI requires non-empty
+            temperature=0,
+        )
+
+    logger.error(
+        "Primary LLM endpoint %s unreachable and QCHEM_OLLAMA_MODEL not set — "
+        "agent calls will fail.", primary_base_url,
+    )
+    return ChatOpenAI(
+        model=primary_model,
+        base_url=primary_base_url,
+        api_key=primary_api_key,
+        temperature=0,
+    )
+
+
+llm = _build_llm()
 
 
 def _is_langfuse_configured() -> bool:
