@@ -19,7 +19,7 @@ class QChemJob(BaseModel):
     multiplicity: int
     atoms: list[tuple[str, float, float, float]]  # (symbol, x, y, z) in Å
     job_type: Literal["energy", "opt", "freq"]
-    engine: Literal["pyscf", "orca", "psi4"] = "pyscf"
+    engine: Literal["pyscf", "orca", "psi4", "xtb"] = "pyscf"
     solvent: str | None = None
     nprocs: int = 1
     memory_mb: int = 4000

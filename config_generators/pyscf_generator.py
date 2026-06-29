@@ -3,6 +3,45 @@
 from schemas import QChemJob
 
 
+# Static dielectric constants (eps, 25 °C) for common solvents. PySCF's PCM model
+# is parameterised by this number rather than by a solvent name; values match the
+# tables used by ORCA/Gaussian CPCM. Keys are lower-cased with common aliases.
+SOLVENT_DIELECTRIC = {
+    "water": 78.3553, "h2o": 78.3553,
+    "methanol": 32.613, "meoh": 32.613,
+    "ethanol": 24.852, "etoh": 24.852,
+    "acetonitrile": 35.688, "mecn": 35.688, "acn": 35.688,
+    "dmso": 46.826, "dimethylsulfoxide": 46.826,
+    "dmf": 37.219, "n,n-dimethylformamide": 37.219,
+    "acetone": 20.493,
+    "dichloromethane": 8.93, "dcm": 8.93, "methylenechloride": 8.93,
+    "chloroform": 4.7113, "chcl3": 4.7113,
+    "thf": 7.4257, "tetrahydrofuran": 7.4257,
+    "toluene": 2.3741,
+    "benzene": 2.2706,
+    "hexane": 1.8819, "n-hexane": 1.8819,
+    "diethylether": 4.2400, "ether": 4.2400, "et2o": 4.2400,
+    "ethylacetate": 5.9867, "ethyl-acetate": 5.9867,
+    "dioxane": 2.2099, "1,4-dioxane": 2.2099,
+    "pyridine": 12.978,
+    "carbontetrachloride": 2.2280, "ccl4": 2.2280,
+    "nitromethane": 36.562,
+    "aceticacid": 6.2528, "acetic-acid": 6.2528,
+    "ammonia": 22.5,
+}
+
+
+def _solvent_eps(name: str) -> float:
+    """Look up the dielectric constant for a solvent name, or raise with hints."""
+    key = name.strip().lower().replace(" ", "")
+    if key in SOLVENT_DIELECTRIC:
+        return SOLVENT_DIELECTRIC[key]
+    raise ValueError(
+        f"Unknown solvent '{name}'. Supported solvents: "
+        f"{', '.join(sorted(SOLVENT_DIELECTRIC))}."
+    )
+
+
 def generate_pyscf(job: QChemJob) -> str:
     """Generate PySCF Python script from QChemJob specification.
     
@@ -28,14 +67,20 @@ def generate_pyscf(job: QChemJob) -> str:
     # Prepare basis (remove spaces for PySCF)
     basis = job.basis.replace(" ", "-")
     
-    # PCM/CPCM solvent support
+    # Implicit-solvent support.
+    # PySCF's solvent module no longer exposes a `CPCM` constructor. We use the
+    # PCM family (solvent.PCM) with the C-PCM variant, which is parameterised by a
+    # numeric dielectric `eps` (not a solvent name), so the job's solvent name is
+    # resolved to its dielectric constant here at generation time.
     solvent_code = ""
     if job.solvent:
+        eps = _solvent_eps(job.solvent)
         solvent_code = f"""
-# Apply CPCM solvent
-from pyscf import solvent
-mf = solvent.CPCM(mf)
-mf.with_solvent.solvent = '{job.solvent}'
+# Apply C-PCM implicit solvent ({job.solvent}, eps={eps})
+from pyscf import solvent  # noqa: F401
+mf = solvent.PCM(mf)
+mf.with_solvent.method = 'C-PCM'
+mf.with_solvent.eps = {eps}
 """
     
     script = f"""#!/usr/bin/env python
@@ -92,6 +137,14 @@ elif method.startswith('ccsd'):
     ref.verbose = 4
     ref.kernel()
     mf = cc.CCSD(ref)
+elif xc_name.startswith('gfn') or xc_name in ('gfnff', 'ipea'):
+    # Semiempirical tight-binding methods are NOT DFT functionals and libxc
+    # does not know them — feeding 'gfn2' to dft.RKS yields the cryptic
+    # "LibXCFunctional: name 'GFN2' not found". Fail with a clear pointer to xTB.
+    raise RuntimeError(
+        f"'{{method}}' is a semiempirical (xTB) method, not a PySCF/DFT functional. "
+        "Run it with the xTB engine instead (engine='xtb')."
+    )
 else:
     # DFT functional — PySCF/libxc validates the name and raises if unknown
     mf = dft.UKS(mol, xc=xc_name) if open_shell else dft.RKS(mol, xc=xc_name)

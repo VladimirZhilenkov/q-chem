@@ -22,6 +22,7 @@ from loguru import logger
 from schemas import QChemJob, QChemResult
 from converter.qchem_converter import detect_format, parse
 from config_generators import generate_pyscf
+from agent.agent_tools.run_xtb import execute_xtb_job
 
 # Allow overriding the Python used to run PySCF scripts.
 # Set PYSCF_PYTHON in .env to point at a conda/WSL Python that has pyscf installed.
@@ -444,6 +445,12 @@ def run_calculation(
     charge: Annotated[int, "Molecular charge."] = 0,
     multiplicity: Annotated[int, "Spin multiplicity (1=singlet, 2=doublet, ...)."] = 1,
     job_type: Annotated[str, "energy, opt, or freq."] = "energy",
+    engine: Annotated[
+        str,
+        "Compute engine: 'pyscf' (ab initio / DFT, default) or 'xtb' "
+        "(fast semiempirical tight-binding — use for GFN2/GFN1/GFN-FF methods). "
+        "Leave empty to auto-detect from the method name.",
+    ] = "",
     solvent: Annotated[str, "Solvent name, or empty for gas phase."] = "",
     orca_or_psi4_input: Annotated[
         str,
@@ -477,6 +484,12 @@ def run_calculation(
                     "(comma-separated) — e.g. the output of parse_molecule — or pass "
                     "orca_or_psi4_input."
                 )
+            # Resolve the engine: explicit choice wins; otherwise route GFN*/GFN-FF
+            # methods to xTB (they are semiempirical, not DFT) and everything else
+            # to PySCF.
+            resolved_engine = engine.strip().lower()
+            if not resolved_engine:
+                resolved_engine = "xtb" if method.lower().startswith("gfn") else "pyscf"
             job = QChemJob(
                 id="run",
                 method=method,
@@ -485,10 +498,13 @@ def run_calculation(
                 multiplicity=multiplicity,
                 atoms=atom_list,
                 job_type=job_type if job_type in ("energy", "opt", "freq") else "energy",
-                engine="pyscf",
+                engine=resolved_engine if resolved_engine in ("pyscf", "xtb") else "pyscf",
                 solvent=solvent or None,
             )
-            res = _execute_pyscf_job(job, timeout_seconds=timeout_seconds)
+            if job.engine == "xtb":
+                res = execute_xtb_job(job, timeout_seconds=timeout_seconds)
+            else:
+                res = _execute_pyscf_job(job, timeout_seconds=timeout_seconds)
     except (ValueError, RuntimeError) as exc:
         logger.error("run_calculation failed: {}", exc)
         return f"Calculation failed: {exc}"

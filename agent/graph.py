@@ -55,6 +55,8 @@ _SYSTEM = """You are a quantum chemistry assistant. Help users generate configur
 
 To CALCULATE / COMPUTE / RUN anything (energy, geometry optimization, frequencies, HOMO-LUMO, charges, dipole), use run_calculation — it actually executes the calculation and returns the numbers. First get the geometry with parse_molecule (common molecules) or get_molecule_from_pubchem (anything else), then call run_calculation with that geometry as `atoms`, plus method/basis/job_type. Report the returned results to the user; never paste the raw tool output or a script as your answer.
 
+For fast semiempirical methods (GFN2, GFN1, GFN-FF / "xtb"), set engine='xtb' in run_calculation (basis is ignored for xTB). For ab initio / DFT methods (HF, MP2, CCSD, B3LYP, PBE0, ...) leave engine='pyscf' (the default). Solvent is supported by both engines — just pass the solvent name (e.g. 'water').
+
 Only use generate_config when the user explicitly asks for the INPUT FILE / script itself (not results) — it does NOT run anything. Use validate_basis to confirm a basis set when unsure.
 
 You have access to the following tools:
